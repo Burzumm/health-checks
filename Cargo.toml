@@ -1,0 +1,15 @@
+[package]
+name = "health-checks"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.21.2", features = ["full"] }
+parking_lot = "0.12.1"
+socket2 = { version = "0.4.7", features = ["all"] }
+tracing = "0.1.37"
+futures = "0.3.25"
+async-process = "1.6.0"
+log = "0.4.17"
+tracing-subscriber = "0.3.16"
+tracing-attributes = "0.1.23"
