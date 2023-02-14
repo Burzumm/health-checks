@@ -28,6 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+
 #[instrument]
 async fn ping(addr: &str) {
     let mut interval = time::interval(Duration::from_secs(10));
