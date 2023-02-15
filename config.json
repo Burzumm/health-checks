@@ -1,0 +1,6 @@
+{
+    "addreses" : ["8.8.8.8", "1.1.1.1", "ya"],
+    "tiemout_secs" : 10,
+    "telegram_api_token" : "123",
+    "teelgram_chat_ids" : 111111
+}
