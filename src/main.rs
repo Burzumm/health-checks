@@ -1,14 +1,14 @@
+use addr::parse_domain_name;
 use async_process::Command;
+use clap::Parser;
 use futures::future::join_all;
 use serde::{Deserialize, Serialize};
+use std::fs;
 use std::net::IpAddr;
 use std::time::Duration;
 use tokio::time;
 use tracing::{error, info, warn};
 use tracing_attributes::instrument;
-use addr::parse_domain_name;
-use clap::Parser;
-use std::fs;
 
 use telegram_bot_rust::{Message, TelegramBot};
 use tokio::task::JoinHandle;
@@ -41,21 +41,28 @@ fn get_config() -> AppConfig {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = get_config();
+    let telegram_bot = TelegramBot::new(config.telegram_api_token.to_string());
+    telegram_bot.get_me().await;
     tracing_subscriber::fmt().try_init().unwrap();
     let mut tasks: Vec<JoinHandle<()>> = Vec::new();
     for addr in &config.addresses {
         let conf = config.clone();
         match addr.parse() {
             Ok(IpAddr::V4(_addr)) => {
-                tasks.push(tokio::spawn(ping_handler(_addr.to_string(), conf)))
+                tasks.push(tokio::spawn(ping_handler(_addr.to_string(), conf.clone())));
+                tasks.push(tokio::spawn(get_updates( conf)))
             }
             Ok(IpAddr::V6(_addr)) => {
-                tasks.push(tokio::spawn(ping_handler(_addr.to_string(), conf)))
+                tasks.push(tokio::spawn(ping_handler(_addr.to_string(), conf.clone())));
+                tasks.push(tokio::spawn(get_updates( conf)))
             }
             Err(e) => {
                 let domain = parse_domain_name(addr);
                 match domain {
-                    Ok(_addr) => tasks.push(tokio::spawn(ping_handler(_addr.to_string(), conf))),
+                    Ok(_addr) =>{
+                        tasks.push(tokio::spawn(ping_handler(_addr.to_string(), conf.clone())));
+                        tasks.push(tokio::spawn(get_updates( conf)))
+                    }
                     Err(err) => panic!("{} parse to addr error: {} {}", addr, e, err),
                 }
             }
@@ -63,6 +70,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     join_all(tasks).await;
     Ok(())
+}
+
+async fn get_updates(app_config: AppConfig){
+    loop{
+        let mut telegram_bot = TelegramBot::new(app_config.telegram_api_token.to_string());
+        let updates = telegram_bot.get_updates(10).await;
+        for update in updates {
+            println!("{}", update.update_id)
+        }
+    }
 }
 
 #[instrument]
