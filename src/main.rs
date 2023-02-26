@@ -1,38 +1,33 @@
 mod commands;
+mod configs;
 
+use crate::commands::TelegramCommand;
+use crate::configs::{AppConfig, PingConfig, TelegramConfig};
 use addr::parse_domain_name;
 use async_process::Command;
 use clap::Parser;
 use futures::future::join_all;
 use futures::task::Spawn;
 use serde::{Deserialize, Serialize};
+use std::cell::RefCell;
 use std::fs;
 use std::net::IpAddr;
 use std::rc::Rc;
-use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, watch};
+use telegram_bot_rust::{Message, TelegramBot};
+use tokio::sync::broadcast::{Receiver, Sender};
+use tokio::sync::{broadcast, watch, Mutex};
+use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{error, info, warn};
 use tracing_attributes::instrument;
-use telegram_bot_rust::{Message, TelegramBot};
-use tokio::sync::broadcast::Sender;
-use tokio::task::JoinHandle;
-use crate::commands::TelegramCommand;
-
-#[derive(Serialize, Deserialize, Debug, Clone)]
-struct AppConfig {
-    addresses: Vec<String>,
-    timeout_secs: i64,
-    telegram_api_token: String,
-    telegram_chat_ids: Vec<i64>,
-}
+use url::Url;
 
 #[derive(Clone)]
 struct ChannelMessage {
     addr: String,
-    command: Rc<dyn TelegramCommand>,
+    //command: Rc<dyn TelegramCommand>
 }
 
 #[derive(Parser, Debug)]
@@ -55,15 +50,16 @@ fn get_config() -> AppConfig {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Arc::new(get_config());
-    let telegram_bot = TelegramBot::new(config.telegram_api_token.to_string());
+    let telegram_bot = TelegramBot::new(config.telegram_config.telegram_api_token.to_string());
     telegram_bot.get_me().await;
     tracing_subscriber::fmt().try_init().unwrap();
-    let (tx , _) = broadcast::channel(16);
+    let (tx, _) = broadcast::channel(16);
 
     let mut tasks: Vec<JoinHandle<()>> = Vec::new();
-    for addr in &config.addresses {
+    for addr in &config.ping_config.addresses {
         let conf = Arc::clone(&config);
-        let rx: Rc<Receiver<ChannelMessage>> = Rc::new(tx.subscribe());
+        let rx = tx.subscribe();
+
         match addr.parse() {
             Ok(IpAddr::V4(_addr)) => {
                 tasks.push(tokio::spawn(ping_handler(_addr.to_string(), conf, rx)));
@@ -79,6 +75,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             },
         }
     }
+
+    for addr in &config.request_config.addresses {
+        let conf = Arc::clone(&config);
+        let rx = tx.subscribe();
+        match Url::parse(addr) {
+            Ok(_addr) => {
+                tasks.push(tokio::spawn(request_handler(_addr.to_string(), conf, rx)));
+            }
+            Err(err) => panic!("{} parse to addr error: {}", addr, err),
+        }
+    }
+
     let conf = Arc::clone(&config);
     tasks.push(tokio::spawn(get_updates(conf, tx)));
     join_all(tasks).await;
@@ -87,7 +95,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 async fn get_updates(app_config: Arc<AppConfig>, tx: Sender<ChannelMessage>) {
     let mut update_id: Option<i64> = None;
-    let mut telegram_bot = TelegramBot::new(app_config.telegram_api_token.to_string());
+    let mut telegram_bot =
+        TelegramBot::new(app_config.telegram_config.telegram_api_token.to_string());
     loop {
         let updates = telegram_bot.get_updates(10, update_id).await.unwrap();
         for update in updates {
@@ -99,18 +108,83 @@ async fn get_updates(app_config: Arc<AppConfig>, tx: Sender<ChannelMessage>) {
 }
 
 #[instrument]
-async fn ping_handler(
+async fn request_handler(
     addr: String,
     app_config: Arc<AppConfig>,
-    mut rx: broadcast::Receiver<ChannelMessage>,
+    mut rx: Receiver<ChannelMessage>,
 ) {
-    let mut interval = time::interval(Duration::from_secs(app_config.timeout_secs as u64));
-    let telegram_bot = TelegramBot::new(app_config.telegram_api_token.to_string());
+    let telegram_bot = TelegramBot::new(app_config.telegram_config.telegram_api_token.to_string());
+    let mut interval = time::interval(Duration::from_secs(
+        app_config.request_config.timeout_secs as u64,
+    ));
     loop {
-        let rx_result = rx.is_empty();
-        if !rx_result {
-            let message = rx.recv().await.unwrap();
+        let response = reqwest::get(addr.to_string()).await;
+        match response {
+            Ok(result) => {
+                if result.status() != 200 {
+                    let message = format!(
+                        "🔥🔥🔥 HOST: {} UNAVAILABLE 🔥🔥🔥, status code: {}, body: {} \n",
+                        addr,
+                        result.status(),
+                        result.text().await.unwrap()
+                    );
+                    warn!(message);
+                    send_telegram_alert(
+                        &message,
+                        &telegram_bot,
+                        &app_config.telegram_config.telegram_chat_ids,
+                    )
+                    .await
+                } else {
+                    info!("host: {} available \n", addr);
+                }
+            }
+            Err(err) => {
+                let message = format!("error request to addr: {}, error: {}", addr, err);
+                error!("error request err: {}", err);
+                send_telegram_alert(
+                    &message,
+                    &telegram_bot,
+                    &app_config.telegram_config.telegram_chat_ids,
+                ).await;
+            }
         }
+        interval.tick().await;
+    }
+}
+
+async fn send_telegram_alert(message: &String, telegram_bot: &TelegramBot, recipients: &Vec<i64>) {
+    for telegram_chat_id in recipients.into_iter() {
+        let response = telegram_bot
+            .send_message(Message::new(*telegram_chat_id, message.to_string()))
+            .await;
+        match response {
+            Ok(res) => match res.status().as_u16() {
+                200 => info!(
+                    "was sent alert successfully, status code: {}",
+                    res.status().to_string()
+                ),
+                _ => error!(
+                    "failed sent alert  error: status code: {}",
+                    res.status().to_string()
+                ),
+            },
+            Err(err) => error!("failed sent alert  error: {}", err),
+        };
+    }
+}
+
+#[instrument]
+async fn ping_handler(addr: String, app_config: Arc<AppConfig>, mut rx: Receiver<ChannelMessage>) {
+    let mut interval = time::interval(Duration::from_secs(
+        app_config.ping_config.timeout_secs as u64,
+    ));
+    let telegram_bot = TelegramBot::new(app_config.telegram_config.telegram_api_token.to_string());
+    loop {
+        // let rx_result = rx.is_empty();
+        // if !rx_result {
+        //     let message = rx.recv().await.unwrap();
+        // }
         let output_ping = Command::new("ping")
             .arg(&addr)
             .arg("-c")
@@ -122,31 +196,25 @@ async fn ping_handler(
                 if output.status.success() {
                     info!("host: {} available \n", addr);
                 } else {
-                    warn!("host: {} unavailable \n", addr);
-                    for telegram_chat_id in app_config.telegram_chat_ids.clone().into_iter() {
-                        let response = telegram_bot
-                            .send_message(Message::new(
-                                telegram_chat_id,
-                                format!("🔥🔥🔥 HOST: {} UNAVAILABLE 🔥🔥🔥 \n", addr),
-                            ))
-                            .await;
-                        match response {
-                            Ok(res) => match res.status().as_u16() {
-                                200 => info!(
-                                    "was sent alert successfully, status code: {}",
-                                    res.status().to_string()
-                                ),
-                                _ => error!(
-                                    "failed sent alert  error: status code: {}",
-                                    res.status().to_string()
-                                ),
-                            },
-                            Err(err) => error!("failed sent alert  error: {}", err),
-                        };
-                    }
+                    let message = format!("🔥🔥🔥 HOST: {} UNAVAILABLE 🔥🔥🔥 \n", addr);
+                    warn!(message);
+                    send_telegram_alert(
+                        &message,
+                        &telegram_bot,
+                        &app_config.telegram_config.telegram_chat_ids,
+                    )
+                    .await;
                 }
             }
-            Err(_) => warn!("host: {}unavailable \n", addr),
+            Err(err) => {
+                let message = format!("error request to addr: {}, error: {}", addr, err);
+                error!("error request err: {}", err);
+                send_telegram_alert(
+                    &message,
+                    &telegram_bot,
+                    &app_config.telegram_config.telegram_chat_ids,
+                ).await;
+            },
         }
         interval.tick().await;
     }
