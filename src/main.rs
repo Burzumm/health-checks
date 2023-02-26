@@ -1,30 +1,28 @@
 mod commands;
 mod configs;
 
-use crate::commands::TelegramCommand;
-use crate::configs::{AppConfig, PingConfig, TelegramConfig};
+use crate::configs::AppConfig;
 use addr::parse_domain_name;
 use async_process::Command;
 use clap::Parser;
 use futures::future::join_all;
-use futures::task::Spawn;
-use serde::{Deserialize, Serialize};
-use std::cell::RefCell;
+
 use std::fs;
 use std::net::IpAddr;
-use std::rc::Rc;
+
+use crate::commands::set_telegram_commands;
 use std::sync::Arc;
 use std::time::Duration;
-use telegram_bot_rust::{Message, TelegramBot};
+use telegram_bot_rust::{BotCommand, Message, TelegramBot};
+use tokio::sync::broadcast;
 use tokio::sync::broadcast::{Receiver, Sender};
-use tokio::sync::{broadcast, watch, Mutex};
 use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{error, info, warn};
 use tracing_attributes::instrument;
 use url::Url;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct ChannelMessage {
     addr: String,
     //command: Rc<dyn TelegramCommand>
@@ -51,6 +49,8 @@ fn get_config() -> AppConfig {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Arc::new(get_config());
     let telegram_bot = TelegramBot::new(config.telegram_config.telegram_api_token.to_string());
+    let command = BotCommand::new("/test".to_string(), "ttt".to_string());
+    set_telegram_commands(&vec![command], &telegram_bot).await;
     telegram_bot.get_me().await;
     tracing_subscriber::fmt().try_init().unwrap();
     let (tx, _) = broadcast::channel(16);
@@ -102,22 +102,23 @@ async fn get_updates(app_config: Arc<AppConfig>, tx: Sender<ChannelMessage>) {
         for update in updates {
             update_id = Some(update.update_id);
             println!("{}", update.update_id);
-            //tx.send("1111".to_string()).expect("TODO: panic message");
+            tx.send(ChannelMessage {
+                addr: "1234".to_string(),
+            })
+            .unwrap();
         }
     }
 }
 
 #[instrument]
-async fn request_handler(
-    addr: String,
-    app_config: Arc<AppConfig>,
-    mut rx: Receiver<ChannelMessage>,
-) {
+async fn request_handler(addr: String, app_config: Arc<AppConfig>, rx: Receiver<ChannelMessage>) {
+    let mut retry_count = 0;
     let telegram_bot = TelegramBot::new(app_config.telegram_config.telegram_api_token.to_string());
     let mut interval = time::interval(Duration::from_secs(
         app_config.request_config.timeout_secs as u64,
     ));
     loop {
+        retry_count += 1;
         let response = reqwest::get(addr.to_string()).await;
         match response {
             Ok(result) => {
@@ -129,12 +130,15 @@ async fn request_handler(
                         result.text().await.unwrap()
                     );
                     warn!(message);
-                    send_telegram_alert(
-                        &message,
-                        &telegram_bot,
-                        &app_config.telegram_config.telegram_chat_ids,
-                    )
-                    .await
+                    if retry_count > app_config.request_config.retry {
+                        send_telegram_alert(
+                            &message,
+                            &telegram_bot,
+                            &app_config.telegram_config.telegram_chat_ids,
+                        )
+                        .await;
+                        retry_count = 0
+                    }
                 } else {
                     info!("host: {} available \n", addr);
                 }
@@ -146,17 +150,18 @@ async fn request_handler(
                     &message,
                     &telegram_bot,
                     &app_config.telegram_config.telegram_chat_ids,
-                ).await;
+                )
+                .await;
             }
         }
         interval.tick().await;
     }
 }
 
-async fn send_telegram_alert(message: &String, telegram_bot: &TelegramBot, recipients: &Vec<i64>) {
-    for telegram_chat_id in recipients.into_iter() {
+async fn send_telegram_alert(message: &String, telegram_bot: &TelegramBot, recipients: &[i64]) {
+    for telegram_chat_id in recipients.iter() {
         let response = telegram_bot
-            .send_message(Message::new(*telegram_chat_id, message.to_string()))
+            .send_message(&Message::new(*telegram_chat_id, message.to_string()))
             .await;
         match response {
             Ok(res) => match res.status().as_u16() {
@@ -175,7 +180,8 @@ async fn send_telegram_alert(message: &String, telegram_bot: &TelegramBot, recip
 }
 
 #[instrument]
-async fn ping_handler(addr: String, app_config: Arc<AppConfig>, mut rx: Receiver<ChannelMessage>) {
+async fn ping_handler(addr: String, app_config: Arc<AppConfig>, rx: Receiver<ChannelMessage>) {
+    let mut retry_count = 0;
     let mut interval = time::interval(Duration::from_secs(
         app_config.ping_config.timeout_secs as u64,
     ));
@@ -198,12 +204,15 @@ async fn ping_handler(addr: String, app_config: Arc<AppConfig>, mut rx: Receiver
                 } else {
                     let message = format!("🔥🔥🔥 HOST: {} UNAVAILABLE 🔥🔥🔥 \n", addr);
                     warn!(message);
-                    send_telegram_alert(
-                        &message,
-                        &telegram_bot,
-                        &app_config.telegram_config.telegram_chat_ids,
-                    )
-                    .await;
+                    if retry_count > app_config.request_config.retry {
+                        send_telegram_alert(
+                            &message,
+                            &telegram_bot,
+                            &app_config.telegram_config.telegram_chat_ids,
+                        )
+                        .await;
+                        retry_count = 0
+                    }
                 }
             }
             Err(err) => {
@@ -213,8 +222,9 @@ async fn ping_handler(addr: String, app_config: Arc<AppConfig>, mut rx: Receiver
                     &message,
                     &telegram_bot,
                     &app_config.telegram_config.telegram_chat_ids,
-                ).await;
-            },
+                )
+                .await;
+            }
         }
         interval.tick().await;
     }
