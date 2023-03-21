@@ -1,29 +1,35 @@
+use core::fmt;
 use serde::{Deserialize, Serialize};
+
 use telegram_bot_rust::{BotCommand, TelegramBot};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub enum Commands {
+    StopAll,
+    SleepAll,
     Stop,
     Sleep,
 }
 
-pub trait TelegramCommand {
-    fn handle(&self);
-
-    fn get_command_key(&self) -> Commands;
+impl fmt::Display for Commands {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+pub trait TelegramCommand {
+    fn handle(&self);
+}
+
 pub struct StopCommand {}
+
+pub struct StopAllCommand {}
+
+pub struct SleepAllCommand {}
 
 impl TelegramCommand for StopCommand {
     fn handle(&self) {
         todo!()
-    }
-
-    #[inline]
-    fn get_command_key(&self) -> Commands {
-        return Commands::Stop;
     }
 }
 
@@ -31,20 +37,26 @@ impl TelegramCommand for SleepCommand {
     fn handle(&self) {
         todo!()
     }
+}
 
-    #[inline]
-    fn get_command_key(&self) -> Commands {
-        return Commands::Sleep;
+impl TelegramCommand for SleepAllCommand {
+    fn handle(&self) {
+        todo!()
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+impl TelegramCommand for StopAllCommand {
+    fn handle(&self) {
+        todo!()
+    }
+}
+
 pub struct SleepCommand {
-    sleep_time: u64,
+    pub sleep_time: u64,
 }
 
 pub async fn set_telegram_commands(commands: &Vec<BotCommand>, telegram_bot: &TelegramBot) {
-    let gg = telegram_bot
+    let _ = telegram_bot
         .set_commands(commands)
         .await
         .unwrap()
