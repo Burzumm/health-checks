@@ -14,8 +14,6 @@ use std::net::IpAddr;
 
 use std::{fs, thread};
 
-
-
 use std::sync::Arc;
 use std::time::Duration;
 use telegram_bot_rust::{Message, TelegramBot, TelegramMessage, TelegramUpdate, UpdatedMessage};
@@ -163,7 +161,7 @@ async fn send_telegram_alert(
         let msg: Option<TelegramMessage> = match response {
             Ok(msg) => Some(msg.result),
             Err(err) => {
-                error!("failed sent alert  error: {}", err);
+                error!("failed send alert  error: {}", err);
                 None
             }
         };
@@ -200,7 +198,7 @@ async fn ping_handler(
             Ok(output) => {
                 if output.status.success() {
                     info!("host: {} available \n", addr.address);
-
+                    retry_count = 0;
                     for (i, msg) in send_alert_messages.clone().iter().enumerate() {
                         if let Some(msg) = msg {
                             match &msg.text {
