@@ -2,30 +2,29 @@ extern crate core;
 
 mod commands;
 mod configs;
+use std::option::Option;
 
-use crate::configs::{AppConfig};
+use crate::configs::AppConfig;
 use addr::parse_domain_name;
 use async_process::Command;
 use clap::Parser;
 use futures::future::join_all;
 
 use std::net::IpAddr;
-use std::rc::Rc;
+
 use std::{fs, thread};
 
-use crate::commands::{TelegramCommand};
+
 
 use std::sync::Arc;
 use std::time::Duration;
-use telegram_bot_rust::{Message, TelegramBot, TelegramUpdate};
+use telegram_bot_rust::{Message, TelegramBot, TelegramMessage, TelegramUpdate, UpdatedMessage};
 use tokio::sync::broadcast;
 use tokio::sync::broadcast::{Receiver, Sender};
 use tokio::task::JoinHandle;
 use tokio::time;
 use tracing::{error, info, warn};
 use tracing_attributes::instrument;
-
-
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -151,25 +150,26 @@ async fn request_handler(addr: String, app_config: Arc<AppConfig>, rx: Receiver<
     }
 }
 
-async fn send_telegram_alert(message: &String, telegram_bot: &TelegramBot, recipients: &[i64]) {
+async fn send_telegram_alert(
+    message: &String,
+    telegram_bot: &TelegramBot,
+    recipients: &[i64],
+) -> Vec<Option<TelegramMessage>> {
+    let mut result: Vec<Option<TelegramMessage>> = Vec::new();
     for telegram_chat_id in recipients.iter() {
         let response = telegram_bot
             .send_message(&Message::new(*telegram_chat_id, message.to_string()))
             .await;
-        match response {
-            Ok(res) => match res.status().as_u16() {
-                200 => info!(
-                    "was sent alert successfully, status code: {}",
-                    res.status().to_string()
-                ),
-                _ => error!(
-                    "failed sent alert  error: status code: {}",
-                    res.status().to_string()
-                ),
-            },
-            Err(err) => error!("failed sent alert  error: {}", err),
+        let msg: Option<TelegramMessage> = match response {
+            Ok(msg) => Some(msg.result),
+            Err(err) => {
+                error!("failed sent alert  error: {}", err);
+                None
+            }
         };
+        result.push(msg);
     }
+    return result;
 }
 
 #[instrument]
@@ -184,6 +184,7 @@ async fn ping_handler(
         app_config.ping_config.timeout_secs as u64,
     ));
     let telegram_bot = TelegramBot::new(app_config.telegram_config.telegram_api_token.to_string());
+    let mut send_alert_messages: Vec<Option<TelegramMessage>> = Vec::new();
     loop {
         let rx_result = rx.is_empty();
         if !rx_result {
@@ -199,24 +200,55 @@ async fn ping_handler(
             Ok(output) => {
                 if output.status.success() {
                     info!("host: {} available \n", addr.address);
+
+                    for (i, msg) in send_alert_messages.clone().iter().enumerate() {
+                        if let Some(msg) = msg {
+                            match &msg.text {
+                                Some(text) => {
+                                    if text.contains(&addr.address) {
+                                        send_alert_messages.remove(i);
+                                        let edit_message_result = telegram_bot
+                                            .edit_message_text(&UpdatedMessage::from(
+                                                &msg,
+                                                format!(
+                                                    "✅✅✅\nHOST: {}\n{}\nAVAILABLE\n✅✅✅\n",
+                                                    addr.address, addr.description
+                                                )
+                                                .to_string(),
+                                            ))
+                                            .await;
+                                        match edit_message_result {
+                                            Ok(_) => {}
+                                            Err(err) => {
+                                                error!("failed edit message error: {}", err)
+                                            }
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
                 } else {
-                    retry_count += 1;
-                    let message = format!(
-                        "🔥🔥🔥 HOST: {} - {} UNAVAILABLE 🔥🔥🔥\n",
-                        addr.address, addr.description
-                    );
-                    warn!(message);
-                    if retry_count > app_config.request_config.retry -1  {
-                        send_telegram_alert(
-                            &message,
-                            &telegram_bot,
-                            &app_config.telegram_config.telegram_chat_ids,
-                        )
-                        .await;
-                        retry_count = 0;
-                        thread::sleep(Duration::from_secs(
-                            app_config.ping_config.sleep_after_alert_secs as u64,
-                        ))
+                    if send_alert_messages.len() == 0 {
+                        retry_count += 1;
+                        let message = format!(
+                            "🔥🔥🔥\nHOST: {}\n{}\nUNAVAILABLE\n🔥🔥🔥\n",
+                            addr.address, addr.description
+                        );
+                        warn!(message);
+                        if retry_count > app_config.request_config.retry - 1 {
+                            send_alert_messages = send_telegram_alert(
+                                &message,
+                                &telegram_bot,
+                                &app_config.telegram_config.telegram_chat_ids,
+                            )
+                            .await;
+                            retry_count = 0;
+                            thread::sleep(Duration::from_secs(
+                                app_config.ping_config.sleep_after_alert_secs as u64,
+                            ))
+                        }
                     }
                 }
             }
@@ -238,23 +270,23 @@ async fn ping_handler(
     }
 }
 
-async fn handle_telegram_command(
-    telegram_update: &TelegramUpdate,
-    _telegram_bot: &TelegramBot,
-) -> Vec<Rc<dyn TelegramCommand>> {
-    {
-        let result: Vec<Rc<dyn TelegramCommand>> = Vec::new();
-        for entity in telegram_update.message.entities.iter() {
-            if &entity.message_type == "bot_command" {
-                match &telegram_update.message.text {
-                    Some(text) => match text.as_str() {
-                        "" => {}
-                        &_ => {}
-                    },
-                    _ => {}
-                };
-            }
-        }
-        return result;
-    }
-}
+// async fn handle_telegram_command(
+//     telegram_update: &TelegramUpdate,
+//     _telegram_bot: &TelegramBot,
+// ) -> Vec<Rc<dyn TelegramCommand>> {
+//     {
+//         let result: Vec<Rc<dyn TelegramCommand>> = Vec::new();
+//         for entity in telegram_update.message.entities.iter() {
+//             if &entity.message_type == "bot_command" {
+//                 match &telegram_update.message.text {
+//                     Some(text) => match text.as_str() {
+//                         "" => {}
+//                         &_ => {}
+//                     },
+//                     _ => {}
+//                 };
+//             }
+//         }
+//         return result;
+//     }
+// }

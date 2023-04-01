@@ -45,6 +45,7 @@ impl TelegramCommand for SleepAllCommand {
     }
 }
 
+//
 impl TelegramCommand for StopAllCommand {
     fn handle(&self) {
         todo!()
