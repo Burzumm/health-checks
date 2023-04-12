@@ -1,10 +1,12 @@
+use std::sync::Arc;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct AppConfig {
-    pub request_config: RequestConfig,
-    pub telegram_config: TelegramConfig,
-    pub ping_config: PingConfig,
+    pub request_config: Arc<RequestConfig>,
+    pub telegram_config: Arc<TelegramConfig>,
+    pub ping_config: Arc<PingConfig>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -16,7 +18,7 @@ pub struct RequestConfig {
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PingConfig {
-    pub addresses: Vec<AddressConfig>,
+    pub addresses: Arc<Vec<AddressConfig>>,
     pub timeout_secs: i64,
     pub retry: i64,
     pub sleep_after_alert_secs: i64,
