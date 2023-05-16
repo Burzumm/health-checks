@@ -24,13 +24,13 @@ use tracing::{error, info, warn};
 use tracing_attributes::instrument;
 
 struct HealthChecker {
-    pub allert_manager: Arc<AllertManager>,
+    pub alert_manager: Arc<AlertManager>,
 }
 
 impl HealthChecker {
     async fn ping(&self, address: &str) -> bool {
         let output_ping = Command::new("ping")
-            .arg(&address)
+            .arg(address)
             .arg("-c")
             .arg("1")
             .output()
@@ -48,7 +48,7 @@ impl HealthChecker {
             Err(err) => {
                 let message = format!("error request to addr: {}, error: {}", address, err);
                 warn!("error ping err: {}\n", err);
-                self.allert_manager.send_telegram_alert(&message).await;
+                self.alert_manager.send_telegram_alert(&message).await;
                 return false;
             }
         }
@@ -67,54 +67,50 @@ impl HealthChecker {
                     retry_count = 0;
                     for (i, msg) in send_alert_messages.clone().iter().enumerate() {
                         if let Some(msg) = msg {
-                            match &msg.text {
-                                Some(text) => {
-                                    if text.contains(&addr.address) {
-                                        let edit_result = self
-                                            .allert_manager
-                                            .edit_telegram_about_unavailability(
-                                                &addr.address,
-                                                &addr.description,
-                                                msg,
-                                            )
-                                            .await;
-                                        if edit_result {
-                                            send_alert_messages.remove(i);
-                                        }
+                            if let Some(text) = &msg.text {
+                                if text.contains(&addr.address) {
+                                    let edit_result = self
+                                        .alert_manager
+                                        .edit_telegram_about_unavailability(
+                                            &addr.address,
+                                            &addr.description,
+                                            msg,
+                                        )
+                                        .await;
+                                    if edit_result {
+                                        send_alert_messages.remove(i);
                                     }
                                 }
-                                _ => {}
                             }
                         }
                     }
                 }
                 false => {
-                    if send_alert_messages.len() == 0 {
+                    if send_alert_messages.is_empty() {
                         retry_count += 1;
                         warn!("host: {} {} unavailable", &addr.address, &addr.description);
                         if retry_count > ping_config.retry - 1 {
                             send_alert_messages = self
-                                .allert_manager
-                                .send_a_telegram_about_unavailability(&addr.address, &addr.description)
+                                .alert_manager
+                                .send_a_telegram_about_unavailability(
+                                    &addr.address,
+                                    &addr.description,
+                                )
                                 .await;
-                            if send_alert_messages.iter().any(|x| x.is_none())
-                            {
+                            if send_alert_messages.iter().any(|x| x.is_none()) {
                                 loop {
                                     send_alert_messages = self
-                                        .allert_manager
+                                        .alert_manager
                                         .send_a_telegram_about_unavailability(
                                             &addr.address,
                                             &addr.description,
                                         )
                                         .await;
 
-                                    if !send_alert_messages.iter().any(|x| x.is_none())
-                                    {
+                                    if !send_alert_messages.iter().any(|x| x.is_none()) {
                                         break;
                                     }
-                                    thread::sleep(Duration::from_secs(
-                                        5,
-                                    ))
+                                    thread::sleep(Duration::from_secs(5))
                                 }
                             }
                             retry_count = 0;
@@ -134,18 +130,17 @@ impl HealthChecker {
         }
     }
 
-    
-    pub fn new(allert_manager: Arc<AllertManager>) -> Self {
-        Self { allert_manager }
+    pub fn new(allert_manager: Arc<AlertManager>) -> Self {
+        Self { alert_manager: allert_manager }
     }
 }
 
-struct AllertManager {
+struct AlertManager {
     telegram_bot: Arc<TelegramBot>,
     telegram_config: Arc<TelegramConfig>,
 }
 
-impl AllertManager {
+impl AlertManager {
     pub fn new(telegram_bot: Arc<TelegramBot>, telegram_config: Arc<TelegramConfig>) -> Self {
         Self {
             telegram_bot,
@@ -159,16 +154,18 @@ impl AllertManager {
         descr: &String,
         msg: &TelegramMessage,
     ) -> bool {
-        let message = format!("✅✅✅\nHOST: {}\n{}\nAVAILABLE\n✅✅✅\n", ip, descr).to_string();
+        let message = format!("✅✅✅\nHOST: {}\n{}\nAVAILABLE\n✅✅✅\n", ip, descr);
 
         let edit_message_result = self
             .telegram_bot
-            .edit_message_text(&UpdatedMessage::from(&msg, message))
+            .edit_message_text(&UpdatedMessage::from(msg, message))
             .await;
         match edit_message_result {
-            Ok(_) => return true,
+            Ok(result) => {
+                error!("edit message response result empty");
+                result.result.is_some()},
             Err(err) => {
-                error!("failed edit message error: {}", err);
+                error!("failed edit message, error: {}", err);
                 return false;
             }
         }
@@ -211,7 +208,16 @@ impl AllertManager {
                 .send_message(&Message::new(*telegram_chat_id, message.to_string()))
                 .await;
             let msg: Option<TelegramMessage> = match response {
-                Ok(msg) => Some(msg.result),
+                Ok(msg) => {
+                    match msg.result{
+                        None => {
+                            let message = "send telegram alert response result empty";
+                            error!("{}", message);
+                            None
+                        }
+                        Some(result) => Some(result)
+                    }
+                },
                 Err(err) => {
                     error!("failed send alert  error: {}", err);
                     None
@@ -245,15 +251,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().try_init().unwrap();
     let config = Arc::new(get_config());
 
-    let allert_manager = Arc::new(AllertManager::new(
+    let alert_manager = Arc::new(AlertManager::new(
         Arc::new(TelegramBot::new(
             config.telegram_config.telegram_api_token.to_string(),
         )),
         config.telegram_config.clone(),
     ));
 
-    let health_check = Arc::new(HealthChecker::new(allert_manager));
-    let _ = &health_check.allert_manager.telegram_bot.get_me().await;
+    let health_check = Arc::new(HealthChecker::new(alert_manager));
+    let _ = &health_check.alert_manager.telegram_bot.get_me().await;
 
     let mut tasks: Vec<JoinHandle<()>> = Vec::new();
     for (i, addr) in config.ping_config.addresses.iter().enumerate() {
@@ -261,20 +267,20 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         let health_check_scope = Arc::clone(&health_check);
         match addr.address.parse() {
             Ok(IpAddr::V4(_addr)) => {
-                tasks.push(tokio::spawn(
-                    health_check_scope.ping_health_handler(i, conf),
-                ));
+                tasks.push(tokio::spawn(async move {
+                    health_check_scope.ping_health_handler(i, conf).await
+                }));
             }
             Ok(IpAddr::V6(_addr)) => {
-                tasks.push(tokio::spawn(
-                    health_check_scope.ping_health_handler(i, conf),
-                ));
+                tasks.push(tokio::spawn(async move {
+                    health_check_scope.ping_health_handler(i, conf).await
+                }));
             }
-            Err(e) => match parse_domain_name(&*addr.address) {
+            Err(e) => match parse_domain_name(&addr.address) {
                 Ok(_addr) => {
-                    tasks.push(tokio::spawn(
-                        health_check_scope.ping_health_handler(i, conf),
-                    ));
+                    tasks.push(tokio::spawn(async move {
+                        health_check_scope.ping_health_handler(i, conf).await
+                    }));
                 }
                 Err(err) => panic!("{} parse to addr error: {} {}", addr.address, e, err),
             },
